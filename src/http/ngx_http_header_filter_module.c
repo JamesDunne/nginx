@@ -152,6 +152,7 @@ ngx_http_header_filter(ngx_http_request_t *r)
 {
     u_char                    *p;
     size_t                     len;
+    ngx_flag_t                 rewrite_location;
     ngx_str_t                  host, *status_line;
     ngx_buf_t                 *b;
     ngx_uint_t                 status, i, port;
@@ -315,62 +316,69 @@ ngx_http_header_filter(ngx_http_request_t *r)
         && r->headers_out.location->value.len
         && r->headers_out.location->value.data[0] == '/')
     {
+        rewrite_location = 1;
+
         r->headers_out.location->hash = 0;
 
-        if (clcf->server_name_in_redirect) {
-            cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
-            host = cscf->server_name;
-
-        } else if (r->headers_in.server.len) {
-            host = r->headers_in.server;
-
+        if (clcf->relative_redirect) {
+            host.data = NULL;
+            host.len = 0;
         } else {
-            host.len = NGX_SOCKADDR_STRLEN;
-            host.data = addr;
+            if (clcf->server_name_in_redirect) {
+                cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
+                host = cscf->server_name;
 
-            if (ngx_connection_local_sockaddr(c, &host, 0) != NGX_OK) {
-                return NGX_ERROR;
+            } else if (r->headers_in.server.len) {
+                host = r->headers_in.server;
+
+            } else {
+                host.len = NGX_SOCKADDR_STRLEN;
+                host.data = addr;
+
+                if (ngx_connection_local_sockaddr(c, &host, 0) != NGX_OK) {
+                    return NGX_ERROR;
+                }
             }
-        }
 
-        switch (c->local_sockaddr->sa_family) {
+            switch (c->local_sockaddr->sa_family) {
 
 #if (NGX_HAVE_INET6)
-        case AF_INET6:
-            sin6 = (struct sockaddr_in6 *) c->local_sockaddr;
-            port = ntohs(sin6->sin6_port);
-            break;
+            case AF_INET6:
+                sin6 = (struct sockaddr_in6 *) c->local_sockaddr;
+                port = ntohs(sin6->sin6_port);
+                break;
 #endif
 #if (NGX_HAVE_UNIX_DOMAIN)
-        case AF_UNIX:
-            port = 0;
-            break;
+            case AF_UNIX:
+                port = 0;
+                break;
 #endif
-        default: /* AF_INET */
-            sin = (struct sockaddr_in *) c->local_sockaddr;
-            port = ntohs(sin->sin_port);
-            break;
-        }
+            default: /* AF_INET */
+                sin = (struct sockaddr_in *) c->local_sockaddr;
+                port = ntohs(sin->sin_port);
+                break;
+            }
 
-        len += sizeof("Location: https://") - 1
-               + host.len
-               + r->headers_out.location->value.len + 2;
+            len += sizeof("Location: https://") - 1
+                   + host.len
+                   + r->headers_out.location->value.len + 2;
 
-        if (clcf->port_in_redirect) {
+            if (clcf->port_in_redirect) {
 
 #if (NGX_HTTP_SSL)
-            if (c->ssl)
-                port = (port == 443) ? 0 : port;
-            else
+                if (c->ssl)
+                    port = (port == 443) ? 0 : port;
+                else
 #endif
-                port = (port == 80) ? 0 : port;
+                    port = (port == 80) ? 0 : port;
 
-        } else {
-            port = 0;
-        }
+            } else {
+                port = 0;
+            }
 
-        if (port) {
-            len += sizeof(":65535") - 1;
+            if (port) {
+                len += sizeof(":65535") - 1;
+            }
         }
 
     } else {
@@ -517,24 +525,28 @@ ngx_http_header_filter(ngx_http_request_t *r)
         *b->last++ = CR; *b->last++ = LF;
     }
 
-    if (host.data) {
-
+    if (rewrite_location) {
         p = b->last + sizeof("Location: ") - 1;
 
-        b->last = ngx_cpymem(b->last, "Location: http",
-                             sizeof("Location: http") - 1);
+        if (host.data) {
+            b->last = ngx_cpymem(b->last, "Location: http",
+                                 sizeof("Location: http") - 1);
 
 #if (NGX_HTTP_SSL)
-        if (c->ssl) {
-            *b->last++ ='s';
-        }
+            if (c->ssl) {
+                *b->last++ ='s';
+            }
 #endif
 
-        *b->last++ = ':'; *b->last++ = '/'; *b->last++ = '/';
-        b->last = ngx_copy(b->last, host.data, host.len);
+            *b->last++ = ':'; *b->last++ = '/'; *b->last++ = '/';
+            b->last = ngx_copy(b->last, host.data, host.len);
 
-        if (port) {
-            b->last = ngx_sprintf(b->last, ":%ui", port);
+            if (port) {
+                b->last = ngx_sprintf(b->last, ":%ui", port);
+            }
+        } else {
+            b->last = ngx_cpymem(b->last, "Location: ",
+                                 sizeof("Location: ") - 1);
         }
 
         b->last = ngx_copy(b->last, r->headers_out.location->value.data,
